@@ -1,81 +1,86 @@
-# AirLLM on Mac Apple Silicon
+# AirLLM on macOS Apple Silicon
 
-Tested setup AirLLM di iMac (macOS 26.x, Apple Silicon, Python 3.9.6 bawaan sistem).
+Setup tested for running [AirLLM](https://github.com/lyogavin/airllm) on macOS with Apple Silicon. This project documents the working environment, the patches required to make inference succeed on the MLX backend, and example scripts.
 
 ## Status
 
-| Task | Status | Catatan |
-|------|--------|---------|
-| Install airllm + mlx | ✅ | venv di `.venv` |
-| Model load & generate | ✅ | tested dengan `Qwen/Qwen2.5-0.5B` |
-| Generate output end-to-end | ✅ | ada 2 patch yang dibutuhkan (lihat di bawah) |
-| HF token untuk model gated | ✅ | lewat `.env` |
+| Task | Status | Notes |
+|------|--------|-------|
+| Install airllm + mlx | ✅ | venv at `.venv` |
+| Model load & generate | ✅ | tested with `Qwen/Qwen2.5-0.5B` |
+| Generate output end-to-end | ✅ | two upstream bugs patched (see below) |
+| HF token for gated models | ✅ | via `.env` |
 
 ## Quick start
 
 ```bash
-cd /Users/kominfo/Documents/Fikri/Project/airllm
+cd /path/to/this/project
+python3 -m venv .venv
 source .venv/bin/activate
-python test_setup.py        # cek env valid
-python example_run.py       # inference publik model (Qwen2.5-0.5B)
+pip install airllm mlx
+python test_setup.py        # verify environment
+python example_run.py       # inference with a public model (Qwen2.5-0.5B)
 ```
 
-Untuk model gated (Llama, Gemma, dll):
+For gated models (Llama, Gemma, etc.):
 
 ```bash
 cp .env.example .env
-# edit .env, set HF_TOKEN=hf_xxx
+# edit .env, set HF_TOKEN=***
 python run_gated.py
 ```
 
-Atau override per-run:
+Or override per-run:
 
 ```bash
-MODEL_ID=meta-llama/Llama-3.2-1B HF_TOKEN=hf_xxx python run_gated.py
+MODEL_ID=meta-llama/Llama-3.2-1B HF_TOKEN=*** python run_gated.py
 ```
 
-## Patches yang aku tambahkan
+## Patches required
 
-Library AirLLM v3.0.1 + MLX backend punya dua masalah di Mac:
+AirLLM v3.0.1 + MLX backend has two issues on macOS:
 
-1. **Unknown keys (`bias`)** — Beberapa model (termasuk Qwen2.5) save `q_proj.bias`/`k_proj.bias`/`v_proj.bias` walaupun config tidak declare `qkv_bias=True`. MLX strict-reject dan crash.
-2. **Tied embeddings (`lm_head`)** — Untuk model dengan `tie_word_embeddings=True` (Qwen2, Llama-3.2, dsb), AirLLM skip save file `lm_head.mlx.npz` karena weight-nya = embed_tokens. Saat inference butuh lm_head, load gagal.
+1. **Unknown keys (`bias`)** — Some models (including Qwen2.5) save `q_proj.bias` / `k_proj.bias` / `v_proj.bias` even when `qkv_bias` is not set in `config.json`. MLX strictly rejects unknown parameters and crashes.
+2. **Tied embeddings (`lm_head`)** — Models with `tie_word_embeddings=True` (Qwen2, Llama-3.2, etc.) cause AirLLM to skip saving the `lm_head.mlx.npz` file because the weight is shared with `embed_tokens`. Loading `lm_head` later fails.
 
-Solusinya: `mlx_patch.py` (di folder ini) monkey-patch:
+The fix: `mlx_patch.py` (in this repo) monkey-patches:
 
-- `mlx.nn.Module.update` → drop keys yang tidak ada di module
-- `MlxModelPersister.load_model` → fall back ke `model.embed_tokens.mlx.npz` saat `lm_head` hilang
+- `mlx.nn.Module.update` to drop keys the layer doesn't know about
+- `MlxModelPersister.load_model` to fall back to `model.embed_tokens.mlx.npz` when `lm_head` is missing
 
-Cara pakainya: import `mlx_patch` **sebelum** `from airllm import AutoModel`. Script `example_run.py` dan `run_gated.py` sudah handle ini.
+Usage: import `mlx_patch` **before** `from airllm import AutoModel`. Both `example_run.py` and `run_gated.py` handle this.
 
-## Struktur folder
+## Project structure
 
 ```
-airllm/
-├── .env.example          # template HF_TOKEN
+.
+├── .env.example          # HF_TOKEN template
 ├── .gitignore
 ├── README.md
-├── example_run.py        # demo model publik (Qwen2.5-0.5B)
-├── run_gated.py          # demo model gated (perlu HF_TOKEN)
-├── test_setup.py         # cek env valid
-├── mlx_patch.py          # shim untuk 2 bug di AirLLM Mac backend
-└── .venv/                # virtualenv (tidak masuk git)
+├── example_run.py        # public model demo (Qwen2.5-0.5B)
+├── run_gated.py          # gated model demo (requires HF_TOKEN)
+├── test_setup.py         # environment verifier
+├── mlx_patch.py          # upstream compatibility shim
+└── .venv/                # virtualenv (not tracked in git)
 ```
 
-## Hardware
+## Tested environment
 
-- **Tested on:** iMac Apple Silicon (M-series), macOS 26.x
-- **Device saat inference:** `mps` (Apple GPU via MLX)
-- **Speed:** ~20-22 it/s untuk Qwen2.5-0.5B di model pertama
-- **Disk usage:** ~990MB untuk Qwen2.5-0.5B (weight) + ~750MB (split cache per layer)
+- **Platform:** macOS Apple Silicon (M-series)
+- **Inference device:** `mps` (Apple GPU via MLX)
+- **Speed:** ~20-22 it/s for Qwen2.5-0.5B on initial run
+- **Disk usage:** ~990 MB for Qwen2.5-0.5B (weights) + ~750 MB (per-layer split cache)
 
-## Limitasi yang diketahui
+The setup also works on Linux with NVIDIA GPUs (uses `cuda` device) and on CPU, but those paths have not been verified in this project.
 
-- Output dari base model `Qwen2.5-0.5B` agak kacau — model ini bukan instruct-tuned. Untuk percakapan yang lebih masuk akal, coba `meta-llama/Llama-3.2-1B-Instruct` (perlu HF token).
-- Python masih 3.9.6 (bawaan macOS). Untuk produksi, lebih ideal pakai Python 3.10/3.11 via Homebrew/pyenv.
-- Setiap run pertama kali di model baru akan download + split. Setelah itu cache sudah ada dan run berikutnya jauh lebih cepat.
+## Known limitations
 
-## Catatan tambahan
+- Base models like `Qwen2.5-0.5B` produce low-quality output — they are not instruction-tuned. For coherent conversation, use instruct variants like `meta-llama/Llama-3.2-1B-Instruct` (requires HF token) or `Qwen/Qwen2.5-1.5B-Instruct`.
+- Python 3.9.6 (the macOS system Python) is what this project was tested with. Python 3.10 or 3.11 is recommended for production use; install via Homebrew or pyenv.
+- The first run on a new model downloads weights and writes per-layer split files. Subsequent runs reuse the cache and are much faster.
+- The patches in `mlx_patch.py` are workarounds for upstream bugs, not a proper fix. Contributions back to the AirLLM project would be welcome.
 
-- `airllm_airllm_llama_mlx.py` line 264: `generate()` method return string (sudah decode), bukan ids. Jangan pakai `return_dict_in_generate=True`.
-- Model yang **bukan** keluarga LLaMA-architecture mungkin butuh backend lain (lihat `airllm_chatglm.py`, `airllm_qwen.py`).
+## Additional notes
+
+- `airllm_llama_mlx.py` line 264: the `generate()` method returns a decoded string, not token ids. Do not pass `return_dict_in_generate=True`.
+- Non-LLaMA-architecture models may require a different backend. See `airllm_chatglm.py`, `airllm_qwen.py` in the installed AirLLM package.
